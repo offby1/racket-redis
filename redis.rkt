@@ -6,8 +6,9 @@
 #lang racket
 
 (require racket/date)
-
 (define-struct connection (in out cust))
+
+;; TODO -- parameters for host, port, db#
 
 (define (connect)
   (let ([cust (make-custodian)])
@@ -15,6 +16,7 @@
       (let-values ([(in out) (tcp-connect "localhost" 6379)])
         (make-connection in out cust)))))
 
+;; You really want to do this at load time?
 (define current-connection (make-parameter (connect)))
 
 (define (disconnect!)
@@ -39,33 +41,37 @@
 
 (define-struct exn:redis (message))
 
+(define bytes->number (compose string->number bytes->string/utf-8))
+(define bytes->symbol (compose string->symbol bytes->string/utf-8))
+
 (define (read-reply)
   (define in (connection-in (current-connection)))
   (match (read-bytes 1 in)
-    [#"-" (read-line in 'return-linefeed)]
-    [#"+" (read-line in 'return-linefeed)]
+    [#"-" (read-bytes-line in 'return-linefeed)] ;no exception on error?
+    [#"+" (read-bytes-line in 'return-linefeed)]
     [#"$" (read-bulk-reply in)]
     [#"*" (read-multi-bulk-reply in)]
-    [#":" (string->number (read-line in 'return-linefeed))]
+    [#":" (bytes->number (read-bytes-line in 'return-linefeed))]
     [_ (raise (make-exn:redis (format "invalid control character: ~a"
                                       (read-byte in))))]))
 
 (define (read-bulk-reply in)
   (flush-output)
-  (let ([length (string->number (read-line in 'return-linefeed))])
+  (let ([length (bytes->number (read-bytes-line in 'return-linefeed))])
     (begin0 (read-bytes length in)
-      (read-line in 'return-linefeed))))
+      (read-bytes-line in 'return-linefeed))))
 
 (define (read-multi-bulk-reply in)
-  (let ([length (string->number (read-line in 'return-linefeed))])
+  (let ([length (bytes->number (read-bytes-line in 'return-linefeed))])
     (flush-output)
     (build-list length
                 (lambda (_) (read-reply)))))
-    
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; COMMANDS
 
+(provide ping)
 (define (ping)
   (send-command "PING")
   (read-reply))
@@ -83,7 +89,7 @@
 ;; Commands operating on all value types
 
 (define (exists? key)
-  (send-command "EXISTS" key) 
+  (send-command "EXISTS" key)
   (match (read-reply)
          [1 #t]
          [0 #f]))
@@ -95,7 +101,7 @@
 
 (define (type key)
   (send-command "TYPE" key)
-  (string->symbol (read-reply)))
+  (bytes->symbol (read-reply)))
 
 (define (keys pattern)
   (send-command "KEYS" pattern)
@@ -148,10 +154,12 @@
   (send-command "FLUSHALL")
   (read-reply))
 
+(provide set)
 (define (set key value)
   (send-command "SET" key value)
   (read-reply))
 
+(provide get)
 (define (get key)
   (send-command "GET" key)
   (read-reply))
